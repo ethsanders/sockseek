@@ -668,7 +668,21 @@ public partial class Searcher : IDisposable
         var q = SearchQuery.FromText(search);
         ownerJob?.UpdateActivity(JobActivityPhase.Searching);
         onSearch?.Invoke();
-        await client.SearchAsync(q, options: opts, cancellationToken: ct, responseHandler: rHandler);
+
+        try
+        {
+            await client.SearchAsync(q, options: opts, cancellationToken: ct, responseHandler: rHandler);
+        }
+        catch (SynchronizationLockException ex)
+        {
+            // Soulseek.NET disposes the search's ReaderWriterLockSlim in a finally block once the
+            // search has ended. If a late peer response is still holding or waiting on that lock,
+            // Dispose throws and the exception replaces the search's normal result. By then the
+            // search is no longer routed new responses and every accepted response has already
+            // gone through rHandler, so keep the results instead of failing the job.
+            ct?.ThrowIfCancellationRequested();
+            SockseekLog.Soulseek.Debug($"Ignoring Soulseek.NET lock disposal race after search '{search}' ended: {ex.Message}");
+        }
     }
 
     private static string GetSearchString(SongQuery query, bool isAlbum)

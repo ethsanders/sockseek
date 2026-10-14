@@ -24,6 +24,7 @@ namespace Tests.ClientTests
         private readonly HashSet<string> disconnectingUsers = new(StringComparer.OrdinalIgnoreCase);
         private int disconnectingSearches;
         private int failingSearches;
+        private int lockDisposalRaceSearches;
 
         public int SearchesCancelledMidDelay { get; private set; }
         public int ConnectCallCount;
@@ -47,6 +48,11 @@ namespace Tests.ClientTests
 
         public void FailNextSearch()
             => Interlocked.Increment(ref failingSearches);
+
+        // Simulates Soulseek.NET's SearchInternal.Dispose() throwing from its finally block
+        // after responses were delivered, replacing the search's result or cancellation.
+        public void FailNextSearchWithLockDisposalRace()
+            => Interlocked.Increment(ref lockDisposalRaceSearches);
 
         public void RaiseKickedFromServer(bool disconnect = true)
         {
@@ -205,7 +211,33 @@ namespace Tests.ClientTests
 
         public Task<Search> SearchAsync(SearchQuery query, Action<SearchResponse> responseHandler, SearchScope? scope = null, int? token = null, SearchOptions? options = null, CancellationToken? cancellationToken = null)
         {
-            return SearchAsyncInternal(query, responseHandler, scope, token, options, cancellationToken).ContinueWith(t => t.Result.Search);
+            var search = SearchAsyncInternal(query, responseHandler, scope, token, options, cancellationToken).ContinueWith(t => t.Result.Search);
+            return TryConsume(ref lockDisposalRaceSearches) ? ThrowLockDisposalRaceAfter(search) : search;
+        }
+
+        private static bool TryConsume(ref int counter)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref counter);
+                if (current <= 0)
+                    return false;
+
+                if (Interlocked.CompareExchange(ref counter, current - 1, current) == current)
+                    return true;
+            }
+        }
+
+        private static async Task<Search> ThrowLockDisposalRaceAfter(Task<Search> search)
+        {
+            try
+            {
+                return await search;
+            }
+            finally
+            {
+                throw new SynchronizationLockException("The lock is being disposed while still being used. It either is being held by a thread and/or has active waiters waiting to acquire the lock.");
+            }
         }
 
         private async Task<(Search Search, IReadOnlyCollection<SearchResponse> Responses)> SearchAsyncInternal(SearchQuery query, Action<SearchResponse>? responseHandler, SearchScope? scope = null, int? token = null, SearchOptions? options = null, CancellationToken? cancellationToken = null)

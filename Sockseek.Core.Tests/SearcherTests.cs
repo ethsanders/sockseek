@@ -142,6 +142,46 @@ namespace Tests.Unit
         }
 
         [TestMethod]
+        public async Task SearchAlbum_SoulseekLockDisposalRaceAfterSearch_KeepsResults()
+        {
+            var response = new SearchResponse("User", 1, true, 1000, 0,
+            [
+                TestHelpers.CreateSlFile(@"ELO\Time\01. Track.mp3", length: 181),
+                TestHelpers.CreateSlFile(@"ELO\Time\02. Track.mp3", length: 182),
+            ]);
+            var client = CreateMockClient([response]);
+            client.FailNextSearchWithLockDisposalRace();
+            var settings = TestHelpers.CreateDefaultSettings().Download;
+            var searcher = CreateSearcher(client, settings);
+            var album = new AlbumJob(new AlbumQuery { Artist = "ELO", Album = "Time" });
+
+            await searcher.SearchAlbum(album, settings.Search, new ResponseData(), CancellationToken.None);
+
+            Assert.AreEqual(2, album.Discovery?.RawResultCount);
+            Assert.AreEqual(1, album.Results.Count);
+        }
+
+        [TestMethod]
+        public async Task SearchAlbum_SoulseekLockDisposalRaceAfterCancellation_StillCancels()
+        {
+            var response = new SearchResponse("User", 1, true, 1000, 0,
+            [
+                TestHelpers.CreateSlFile(@"ELO\Time\01. Track.mp3", length: 181),
+            ]);
+            var client = CreateMockClient([response]);
+            client.FailNextSearchWithLockDisposalRace();
+            var settings = TestHelpers.CreateDefaultSettings().Download;
+            var events = new DownloadEvents();
+            var searcher = new Searcher(client, TestHelpers.CreateUserSuccessTracker(), events, 10, 10);
+            var album = new AlbumJob(new AlbumQuery { Artist = "ELO", Album = "Time" });
+            using var cts = new CancellationTokenSource();
+            events.JobDiscoveryChanged += _ => cts.Cancel();
+
+            await Assert.ThrowsExceptionAsync<OperationCanceledException>(
+                () => searcher.SearchAlbum(album, settings.Search, new ResponseData(), cts.Token));
+        }
+
+        [TestMethod]
         public async Task SearchAlbum_ReturnsMatchingResults()
         {
             var index = TestHelpers.CreateTestIndex();
